@@ -1,0 +1,17 @@
+# Generated data — never commit
+output/
+raw_daily_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment / secrets
+.env
+
+# Editor
+.vscode/
+
+# OS
+.DS_Store
