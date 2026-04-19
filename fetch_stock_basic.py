@@ -4,19 +4,76 @@
 #  Fetches metadata for every US Common-Stock ticker (active
 #  and delisted) from Polygon and writes:
 #      output/US_Share_Stock_Basic_All.parquet
+#
+#  SIC enrichment
+#  ──────────────
+#  Polygon's list endpoint does not return sic_code. After the
+#  Polygon fetch, enrich_sic() fills null sic_code /
+#  sic_description values using the free SEC EDGAR API (~8
+#  req/sec, no key required). Only rows with a CIK but no
+#  sic_code are queried, so daily updates only hit SEC for
+#  newly listed tickers.
 # ─────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 
 import pandas as pd
+import requests
 
 import config
 from utils import paginate
 
+# ── SEC EDGAR settings ────────────────────────────────────────
+_SEC_BASE   = "https://data.sec.gov/submissions"
+_USER_AGENT = "BarFlow hysonlee7-maker"
+_SEC_DELAY  = 0.12   # ~8 req/sec, safely under SEC's 10/sec limit
+
 logger = logging.getLogger(__name__)
+
+
+# ── SEC EDGAR helpers ─────────────────────────────────────────
+def _fetch_sic(cik: str) -> tuple[str | None, str | None]:
+    """Return (sic_code, sic_description) from SEC EDGAR for one CIK."""
+    try:
+        url = f"{_SEC_BASE}/CIK{cik.zfill(10)}.json"
+        r = requests.get(url, headers={"User-Agent": _USER_AGENT}, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            sic = data.get("sic")
+            return (str(sic) if sic else None), data.get("sicDescription")
+    except Exception as e:
+        logger.debug("SEC EDGAR CIK %s → error: %s", cik, e)
+    return None, None
+
+
+def enrich_sic(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fill null sic_code / sic_description for any row that has a CIK.
+    Skips rows already filled — safe to call on partial or full DataFrames.
+    """
+    targets = df[df["cik"].notna() & df["sic_code"].isna()].index.tolist()
+    if not targets:
+        logger.info("SIC enrichment: nothing to do.")
+        return df
+
+    logger.info("SIC enrichment: querying SEC EDGAR for %d tickers…", len(targets))
+    filled = 0
+    for i, idx in enumerate(targets, 1):
+        sic, desc = _fetch_sic(str(df.at[idx, "cik"]))
+        if sic:
+            df.at[idx, "sic_code"]        = sic
+            df.at[idx, "sic_description"] = desc
+            filled += 1
+        if i % 50 == 0:
+            logger.info("  SIC: %d / %d  (filled: %d)", i, len(targets), filled)
+        time.sleep(_SEC_DELAY)
+
+    logger.info("SIC enrichment done: filled %d / %d", filled, len(targets))
+    return df
 
 # Columns to retain from Polygon's /v3/reference/tickers response
 KEEP_COLS: list = [
@@ -105,6 +162,7 @@ def run() -> pd.DataFrame:
         return pd.read_parquet(config.STOCK_BASIC_FILE)
 
     df = fetch_stock_basic()
+    df = enrich_sic(df)
     df.to_parquet(config.STOCK_BASIC_FILE, index=False)
     logger.info("Saved → %s  (%d rows)", config.STOCK_BASIC_FILE, len(df))
     return df

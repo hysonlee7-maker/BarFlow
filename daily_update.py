@@ -24,7 +24,7 @@ from typing import Optional
 import pandas as pd
 
 import config
-from fetch_stock_basic import fetch_stock_basic   # raw fetch, bypasses cache guard
+from fetch_stock_basic import fetch_stock_basic, enrich_sic
 from fetch_daily       import run as run_daily
 from fetch_dividends   import run as run_dividends
 from fetch_splits      import run as run_splits
@@ -74,6 +74,22 @@ def update_stock_basic() -> tuple:
         )
     if not added and not delisted:
         logger.info("Stock Basic: no changes detected.")
+
+    # ── Carry over existing SIC codes ─────────────────────────
+    # Polygon list endpoint never returns sic_code. Re-querying SEC
+    # for all ~10k tickers daily would be slow — instead, copy SIC
+    # data from the previous snapshot and only query SEC for new tickers.
+    if old_tickers:
+        sic_map = (
+            old_df.dropna(subset=["sic_code"])
+            .set_index("ticker")[["sic_code", "sic_description"]]
+        )
+        for col in ["sic_code", "sic_description"]:
+            carried = new_df["ticker"].map(sic_map[col])
+            new_df[col] = new_df[col].fillna(carried)
+
+    # Enrich only tickers still missing SIC (i.e. genuinely new ones)
+    new_df = enrich_sic(new_df)
 
     # Overwrite file with fresh data
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
